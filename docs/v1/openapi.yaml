@@ -1,0 +1,600 @@
+openapi: 3.0.3
+info:
+  title: inventory-api
+  version: 1.0.0
+  description: |
+    Inventory system: items, quantities, storage locations (with map coordinates) and change history.
+
+    Authentication uses JWT: after `/login` send the `access_token`
+    in the `Authorization: Bearer <token>` header. A missing or invalid token results in `401`.
+
+    Roles: `admin` and `employee`. Both roles can view; only `admin` can create, update and delete
+    (otherwise `403`). The role is chosen at sign-up (`employee` by default), and only one `admin` can exist.
+servers:
+  - url: http://localhost:8080/api/v1
+tags:
+  - name: auth
+    description: Sign-up and login
+  - name: users
+    description: Users
+  - name: items
+    description: Inventory items and their history
+  - name: locations
+    description: Storage locations
+paths:
+  /sign-up:
+    post:
+      tags: [auth]
+      summary: Sign up
+      description: |
+        The role is optional and defaults to `employee`. Only one user can be `admin`:
+        once an admin exists, signing up as `admin` returns `409`. The username is lowercased.
+      operationId: signUp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignUpRequest'
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ID'
+        '400':
+          description: Invalid request body, empty fields, invalid password length or invalid role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalidBody:
+                  value: { error: invalid request body }
+                invalidInput:
+                  value: { error: username and password are required }
+                usernameTooLong:
+                  value: { error: username must be at most 100 characters }
+                passwordTooShort:
+                  value: { error: password must be at least 8 characters }
+                passwordTooLong:
+                  value: { error: password must be at most 72 bytes }
+                invalidRole:
+                  value: { error: role must be either admin or employee }
+        '409':
+          description: Username is already taken, or an admin already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                usernameTaken:
+                  value: { error: username already exists }
+                adminExists:
+                  value: { error: admin already exists }
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /login:
+    post:
+      tags: [auth]
+      summary: Log in
+      description: |
+        Returns a pair of JWTs signed with HS256:
+        - `access_token` — for the `Authorization: Bearer <token>` header, lives for `ACCESS_TOKEN_TTL` (15 minutes by default);
+        - `refresh_token` — lives for `REFRESH_TOKEN_TTL` (30 days by default). It is not accepted in place of an access token.
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      responses:
+        '200':
+          description: Successful login
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { error: invalid request body }
+        '401':
+          description: Wrong username or password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { error: invalid username or password }
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /users/me:
+    get:
+      tags: [users]
+      summary: Current user
+      description: Returns the profile and role of the user the token belongs to.
+      operationId: getMe
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /items:
+    get:
+      tags: [items]
+      summary: List items
+      description: Deleted items are not returned. Available to `admin` and `employee`.
+      operationId: listItems
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Item'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [items]
+      summary: Add an item
+      description: Only `admin` can do this. An `added` record is written to the history.
+      operationId: createItem
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ItemRequest'
+      responses:
+        '201':
+          description: Item created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ID'
+        '400':
+          $ref: '#/components/responses/InvalidItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /items/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ItemID'
+    get:
+      tags: [items]
+      summary: Get an item by id
+      description: Available to `admin` and `employee`.
+      operationId: getItem
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Item
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Item'
+        '400':
+          description: Invalid id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { error: invalid item id }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ItemNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [items]
+      summary: Update an item
+      description: |
+        `admin` only. Replaces `name`, `quantity` and `location_id` entirely (if `location_id` is omitted, the location is cleared).
+        A `changed` record with the old and new state is written to the history.
+      operationId: updateItem
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ItemRequest'
+      responses:
+        '204':
+          description: Item updated
+        '400':
+          $ref: '#/components/responses/InvalidItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ItemNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [items]
+      summary: Delete an item
+      description: Only `admin` can do this. The item is hidden from the list but its history is kept; a `deleted` record is written to it.
+      operationId: deleteItem
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Item deleted
+        '400':
+          description: Invalid id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { error: invalid item id }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ItemNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /items/{id}/history:
+    parameters:
+      - $ref: '#/components/parameters/ItemID'
+    get:
+      tags: [items]
+      summary: Item change history
+      description: Records from oldest to newest, including for a deleted item. Available to `admin` and `employee`.
+      operationId: itemHistory
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Item history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/HistoryEntry'
+        '400':
+          description: Invalid id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { error: invalid item id }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ItemNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /locations:
+    get:
+      tags: [locations]
+      summary: List storage locations
+      description: Available to `admin` and `employee`.
+      operationId: listLocations
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of locations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Location'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [locations]
+      summary: Add a storage location
+      description: Only `admin` can do this. Name, latitude and longitude are required.
+      operationId: createLocation
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocationRequest'
+      responses:
+        '201':
+          description: Location created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ID'
+        '400':
+          description: Invalid request body, name or coordinates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalidBody:
+                  value: { error: invalid request body }
+                invalidName:
+                  value: { error: name is required and must be at most 100 characters }
+                invalidCoordinates:
+                  value: { error: latitude (-90..90) and longitude (-180..180) are required }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    ItemID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+  responses:
+    Unauthorized:
+      description: Missing or invalid token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missing:
+              value: { error: missing bearer token }
+            invalid:
+              value: { error: invalid token }
+    Forbidden:
+      description: The token is valid but the role is not allowed to do this
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: { error: forbidden }
+    ItemNotFound:
+      description: Item not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: { error: item not found }
+    InvalidItem:
+      description: Invalid request body, name, quantity or location
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalidBody:
+              value: { error: invalid request body }
+            invalidName:
+              value: { error: name is required and must be at most 200 characters }
+            invalidQuantity:
+              value: { error: quantity must be zero or greater }
+            locationNotFound:
+              value: { error: location not found }
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: { error: internal server error }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    ID:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: integer
+          format: int64
+    Credentials:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          maxLength: 100
+          example: admin
+        password:
+          type: string
+          minLength: 8
+          description: At least 8 characters, at most 72 bytes.
+          example: '12345678'
+    SignUpRequest:
+      allOf:
+        - $ref: '#/components/schemas/Credentials'
+        - type: object
+          properties:
+            role:
+              type: string
+              enum: [admin, employee]
+              default: employee
+              description: Only one user can have the `admin` role.
+    LoginResponse:
+      type: object
+      required: [access_token, refresh_token]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+    User:
+      type: object
+      required: [id, username, role]
+      properties:
+        id:
+          type: integer
+          format: int64
+        username:
+          type: string
+        role:
+          type: string
+          enum: [admin, employee]
+    Item:
+      type: object
+      required: [id, name, quantity, location_id]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        quantity:
+          type: integer
+          format: int64
+          minimum: 0
+        location_id:
+          type: integer
+          format: int64
+          nullable: true
+    ItemRequest:
+      type: object
+      required: [name, quantity]
+      properties:
+        name:
+          type: string
+          maxLength: 200
+          example: Laptop
+        quantity:
+          type: integer
+          format: int64
+          minimum: 0
+          example: 5
+        location_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: Id of a location from `/locations`.
+    Location:
+      type: object
+      required: [id, name, latitude, longitude]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          nullable: true
+          description: Decimal degrees. `null` only for locations created before coordinates were introduced.
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          nullable: true
+          description: Decimal degrees. `null` only for locations created before coordinates were introduced.
+    LocationRequest:
+      type: object
+      required: [name, latitude, longitude]
+      properties:
+        name:
+          type: string
+          maxLength: 100
+          example: Warehouse A
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          example: 38.5598
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          example: 68.787
+    HistoryEntry:
+      type: object
+      required: [id, item_id, user_id, action, changed_at, old_data, new_data]
+      properties:
+        id:
+          type: integer
+          format: int64
+        item_id:
+          type: integer
+          format: int64
+        user_id:
+          type: integer
+          format: int64
+          description: Who made the change.
+        action:
+          type: string
+          enum: [added, changed, deleted]
+        changed_at:
+          type: string
+          format: date-time
+        old_data:
+          $ref: '#/components/schemas/ItemSnapshot'
+        new_data:
+          $ref: '#/components/schemas/ItemSnapshot'
+    ItemSnapshot:
+      type: object
+      nullable: true
+      description: Item state. `old_data` is `null` for `added` and `new_data` is `null` for `deleted`.
+      properties:
+        name:
+          type: string
+        quantity:
+          type: integer
+          format: int64
+        location_id:
+          type: integer
+          format: int64
+          nullable: true

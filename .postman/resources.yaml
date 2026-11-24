@@ -1,0 +1,7 @@
+# Use this workspace to collaborate
+workspace:
+  id: a7857cc9-6bd3-407e-870f-05da64c7f909
+
+localResources:
+  specs:
+    - ../docs/v1/openapi.yaml
